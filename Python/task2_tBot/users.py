@@ -4,32 +4,33 @@ users = {}
 class User:
     def __init__(self, user_id, weight, height, age, activity, city):
         self.user_id = user_id
-        self.weight = weight
-        self.height = height
-        self.age = age
-        self.activity = activity
+        self.weight = int(weight)
+        self.height = int(height)
+        self.age = int(age)
+        self.activity = int(activity)
         self.city = city
-        self.water_goal = self.calculate_water_goal()
+        self.water_goal = 0
         self.calorie_goal = self.calculate_calorie_goal()
         self.logged_water = 0
         self.logged_calories = 0
         self.burned_calories = 0
 
-
-
-    def add_or_update_user(self,user_id, weight, height, age, activity, city):
+    @staticmethod
+    async def add_or_update_user(user_id, weight, height, age, activity, city):
         user = User(user_id, weight, height, age, activity, city)
+        await user.calculate_water_goal()
         users[user_id] = user
 
-    def get_user_by_id(self, user_id):
+    @staticmethod
+    def get_user_by_id(user_id):
         return users.get(user_id, None)
 
-    def calculate_water_goal(self):
-        self.water_goal = self.weight * 30 + 500 * (self.activity)
-        temperature = WeatherAPI.get_weather(self.city)
+    async def calculate_water_goal(self):
+        self.water_goal = self.weight * 30 + 500 * self.activity / 30
+        temperature = await WeatherAPI.get_weather(self.city)
 
         if temperature > 25:
-            self.water_goal -= 1000
+            self.water_goal += 1000
 
         return self.water_goal
 
@@ -37,6 +38,7 @@ class User:
         self.calorie_goal = 10 * self.weight + 6.25 * self.height - 5 * self.age
         # учеть пол или придумать прикол в зависимости от времени и типа тренировки
         return self.calorie_goal
+
 
     def calculate_rest_water(self):
         return self.water_goal - self.logged_water
@@ -57,8 +59,8 @@ class User:
     def log_activity(self, amount):
         self.activity += amount
 
-
-    def user_to_dict(self, user):
+    @staticmethod
+    def user_to_dict(user):
         return {
             "weight": user.weight,
             "height": user.height,

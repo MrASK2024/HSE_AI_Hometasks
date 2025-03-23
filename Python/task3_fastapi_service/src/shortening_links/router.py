@@ -8,9 +8,9 @@ from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel
 from redis_client import get_redis
+from fastapi import BackgroundTasks
 from redis import asyncio as aioredis
 from database import get_async_session
-from fastapi_cache import FastAPICache
 from fastapi_cache.decorator import cache
 from auth.users import current_active_user
 from .shortening_models import shorten_links
@@ -19,6 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, insert, delete, update
 from auth.users import current_active_user, fastapi_users
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -48,7 +51,9 @@ async def create_short_link(url: str = Query(),
                             custom_alias: str = Query(None, description="создание кастомной ссылки(опционально)"),
                             expires_at: Optional[datetime] = Query(None, description="создание c временем жизни ссылки(опционально). Формат: %Y-%m-%d %H:%M "),
                             session: AsyncSession = Depends(get_async_session),
-                            redis: aioredis.Redis = Depends(get_redis)):
+                            redis: aioredis.Redis = Depends(get_redis),
+                            background_tasks: BackgroundTasks = BackgroundTasks(),
+                            ):
     try:   
         short_link = None
         
@@ -68,7 +73,7 @@ async def create_short_link(url: str = Query(),
             short_link = generate_random_short_link()
 
         if expires_at:
-            asyncio.create_task(delete_links_after_delay(session, short_link, expires_at, redis))
+             background_tasks.add_task(delete_links_after_delay, session, short_link, expires_at, redis)
         
         statement = insert(shorten_links).values(url = url, short_link = short_link, creation_date = datetime.now(), expires_at = expires_at, user_id=str(user.id) if user else None)
         await session.execute(statement)
@@ -205,9 +210,6 @@ async def get_short_links(short_code: str, session: AsyncSession = Depends(get_a
             "data": None,
         })
 
-class ShortenRequest(BaseModel):
-    url: str
-
 @router.get("/links/search/")
 async def search_links(url: str, session: AsyncSession = Depends(get_async_session)):
         try:
@@ -233,8 +235,7 @@ async def delete_links_after_delay(session, short_link, expires_at, redis):
         date_now = datetime.now()
         time_difference = expires_at - date_now
         sleep_duration = time_difference.total_seconds()
-        print(sleep_duration)
-        
+
         if sleep_duration > 0:
             await asyncio.sleep(sleep_duration)
     

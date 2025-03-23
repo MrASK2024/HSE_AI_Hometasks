@@ -3,10 +3,14 @@ services:
   db:
     image: postgres:17
     container_name: db_app
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     environment:
       POSTGRES_PASSWORD: 13111730
       POSTGRES_USER: postgres
       POSTGRES_DB: shortening_links_db
+      TZ: Europe/Moscow
     ports:
       - 5432:5432
     healthcheck:
@@ -21,6 +25,11 @@ services:
     image: redis:7
     container_name: redis_app
     command: --port 5370
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    environment:
+      - TZ=Europe/Moscow
     expose:
       - 5370
 
@@ -29,6 +38,11 @@ services:
       context: .
     container_name: fastapi_app
     command: ["docker/app.sh"]
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    environment:
+      - TZ=Europe/Moscow
     ports:
       - 9999:8000
     depends_on:

@@ -164,3 +164,10 @@ cython_debug/
 /data/
 /temp/
 /preview/
+/Python/task3_fastapi_service/manual.txt
+/Python/task3_fastapi_service/pytest.ini
+/Python/task3_fastapi_service/src/__init__.py
+/Python/task3_fastapi_service/src/shortening_links/__init__.py
+/Python/task3_fastapi_service/src/auth/__init__.py
+
+

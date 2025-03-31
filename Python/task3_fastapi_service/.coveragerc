@@ -1,0 +1,8 @@
+[run]
+omit =
+    */test/*
+    */venv/*
+    */migrations/*
+    */src/redis_client.py*
+    */src/database.py*
+    */src/auth/db.py*

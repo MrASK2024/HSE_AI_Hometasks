@@ -1,0 +1,1 @@
+print(len("https://short.link/"))

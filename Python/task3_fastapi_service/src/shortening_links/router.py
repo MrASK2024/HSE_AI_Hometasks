@@ -11,6 +11,7 @@ from redis_client import get_redis
 from fastapi import BackgroundTasks
 from redis import asyncio as aioredis
 from database import get_async_session
+from fastapi_cache import FastAPICache
 from fastapi_cache.decorator import cache
 from auth.users import current_active_user
 from .shortening_models import shorten_links
@@ -29,14 +30,21 @@ router = APIRouter(
     tags=["ShortenLinks"]
 )
 
-async def check_auth_user(short_code: str, user: User = Depends(current_active_user), session: AsyncSession = Depends(get_async_session)):
+async def check_auth_user(short_code: str, user: Optional[User] = Depends(fastapi_users.current_user(active=True, optional=True)), session: AsyncSession = Depends(get_async_session)):
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Вы не авторизованы",
+        )
+          
     query = select(shorten_links.c.user_id).where(shorten_links.c.short_link == short_code)
     result = await session.execute(query)
     
     result = result.fetchall()
-    if result is None:
-        raise HTTPException(status_code=404, detail=f"Cсылки {short_code} не существует")
 
+    if result is None or len(result) == 0:
+        raise HTTPException(status_code=404, detail=f"Cсылки {short_code} не существует")
+    
     user_id = result[0][0]
     if user_id != str(user.id):
         raise HTTPException(
@@ -56,24 +64,28 @@ async def create_short_link(url: str = Query(),
                             ):
     try:   
         short_link = None
-        
         if custom_alias:
             result = await session.execute(
                 select(shorten_links).where(shorten_links.c.short_link == custom_alias)
             )
-    
+        
             if result.scalar() is not None:
-                raise HTTPException(status_code=400, detail={
-                    "status": "error",
-                    "alias": "уже существует",
-                })
-    
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "status": "error",
+                        "message": "Новая короткая ссылка уже существует"
+                    }
+                )
+                
             short_link = custom_alias
+
         else:
             short_link = generate_random_short_link()
 
         if expires_at:
              background_tasks.add_task(delete_links_after_delay, session, short_link, expires_at, redis)
+        
         
         statement = insert(shorten_links).values(url = url, short_link = short_link, creation_date = datetime.now(), expires_at = expires_at, user_id=str(user.id) if user else None)
         await session.execute(statement)
@@ -84,23 +96,24 @@ async def create_short_link(url: str = Query(),
             "short_link": short_link,
             "expires_at": expires_at,
         }
+    
+    except HTTPException:
+        raise
 
     except Exception as e:
         raise HTTPException(status_code=500, detail={
             "status": "error",
-            "message": str(e)
+            "message": "Internal server error",
         })
 
 
 @router.get("/links/{short_code}")
-@cache(expire=60)
+@cache(expire=60, namespace="short_link_stats")
 async def get_short_links(short_code: str, session: AsyncSession = Depends(get_async_session), redis: aioredis.Redis = Depends(get_redis)):
     try:
-        
         query = select(shorten_links.c.url, shorten_links.c.creation_date).where(shorten_links.c.short_link == short_code)
         result = await session.execute(query)
         result = result.fetchall()
-
         url = result[0][0]
         
         update_query = (
@@ -124,48 +137,63 @@ async def get_short_links(short_code: str, session: AsyncSession = Depends(get_a
     except Exception as e:
         raise HTTPException(status_code=500, detail={
             "status": "error",
-            "data": e,
+            "message": "Internal server error"
         })
 
 @router.delete("/links/{short_code}")
 async def delete_short_links(short_code: str, link: bool = Depends(check_auth_user), session: AsyncSession = Depends(get_async_session), redis: aioredis.Redis = Depends(get_redis)):
-    
     delete_query = delete(shorten_links).where(shorten_links.c.short_link == short_code)
     await session.execute(delete_query)
     await session.commit()
     await redis.delete(f"short_url:{short_code}:clics_num")
+    await FastAPICache.clear(namespace=f"short_link_stats:{short_code}")
+
     return {"status": "success deleted", "short_link": short_code}
 
 @router.put("/links/{short_code:path}")
-async def update_short_links(short_code: str, link: bool = Depends(check_auth_user), new_short_code: str = Query(), session: AsyncSession = Depends(get_async_session), redis: aioredis.Redis = Depends(get_redis)):
+async def update_short_links(
+    short_code: str,
+    link: bool = Depends(check_auth_user),
+    new_short_code: str = Query(),
+    session: AsyncSession = Depends(get_async_session),
+    redis: aioredis.Redis = Depends(get_redis)
+):
     try:
-        result = await session.execute(
+        existing_link = await session.execute(
             select(shorten_links).where(shorten_links.c.short_link == new_short_code)
         )
-        if result.scalar() is not None:
-            raise HTTPException(status_code=400, detail={
-                "status": "error",
-                "message": "Новая короткая ссылка уже существует"
-            })
-        
-        result = await session.execute(
+        if existing_link.scalar() is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "message": "Новая короткая ссылка уже существует"
+                }
+            )
+
+        original_link = await session.execute(
             select(shorten_links).where(shorten_links.c.short_link == short_code)
         )
-        if result.scalar() is None:
-            raise HTTPException(status_code=404, detail={
-                "status": "error",
-                "message": "Исходная короткая ссылка не найдена",
-            })
-        
-        update_query = (
+        if original_link.scalar() is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "status": "error", 
+                    "message": "Исходная короткая ссылка не найдена"
+                }
+            )
+
+        await session.execute(
             update(shorten_links)
             .where(shorten_links.c.short_link == short_code)
             .values(short_link=new_short_code)
-            )
-        
-        await redis.delete(f"short_url:{short_code}:clics_num")
+        )
 
-        await session.execute(update_query)
+        try:
+            await redis.delete(f"short_url:{short_code}:clics_num")
+            await FastAPICache.clear(namespace=f"short_link_stats:{short_code}")
+        except Exception as cache_error:
+            print(f"Cache clearing failed: {cache_error}")
 
         await session.commit()
 
@@ -173,21 +201,28 @@ async def update_short_links(short_code: str, link: bool = Depends(check_auth_us
             "status": "success update",
             "new_short_link": new_short_code
         }
+
+    except HTTPException:
+        raise
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail={
-            "status": "error",
-            "data": None,
-        })
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": "Internal server error",
+            }
+        )
 
 
 @router.get("/links/{short_code}/stats")
-@cache(expire=60)
-async def get_short_links(short_code: str, session: AsyncSession = Depends(get_async_session), redis: aioredis.Redis = Depends(get_redis)):
+@cache(expire=60, namespace="short_link_stats")
+async def get_short_links_stats(short_code: str, session: AsyncSession = Depends(get_async_session), redis: aioredis.Redis = Depends(get_redis)):
     try:
         query = select(shorten_links.c.url, shorten_links.c.creation_date, shorten_links.c.last_use_date).where(shorten_links.c.short_link == short_code)
         result = await session.execute(query)
         result = result.fetchall()
-
+        
         url = result[0][0]
         date_create = result[0][1]
         last_use_date = result[0][2]
@@ -218,7 +253,7 @@ async def search_links(url: str, session: AsyncSession = Depends(get_async_sessi
             result = result.fetchall()
 
             short_link = result[0][0]
-            
+
             return {
                 "status": "success",
                 "short_link": short_link
@@ -244,13 +279,17 @@ async def delete_links_after_delay(session, short_link, expires_at, redis):
             await session.commit()
             
             await redis.delete(f"short_url:{short_link}:clics_num")
+            await FastAPICache.clear(namespace=f"short_link_stats:{short_link}")
             
             print(f"Строка с short_link={short_link} удалена.")
+            return True
+        
+        return False
 
     except Exception as e:
         raise HTTPException(status_code=500, detail={
             "status": "error",
-            "message": str(e)
+            "message": "ошибка удаления ссылки по времени"
         })
 
 def generate_random_short_link(length=6):
